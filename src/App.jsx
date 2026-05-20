@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useRef } from "react";
+import { generateAIInsights } from "./services/geminiInsights";
 import {
   BarChart, Bar, LineChart, Line, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -446,6 +447,11 @@ export default function DataPulse() {
   const [explorerY, setExplorerY] = useState("");
   const [explorerType, setExplorerType] = useState("bar");
 
+  // AI insights state
+  const [aiInsights, setAiInsights] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
+
   const fileRef = useRef();
 
   const handleFile = useCallback((file) => {
@@ -505,6 +511,8 @@ export default function DataPulse() {
       setExplorerX(numericCols[0] || "");
       setExplorerY(numericCols[1] || numericCols[0] || "");
       setAnalysis({ types, statsMap, correlations, catBreakdowns, insights, quality, recommendations });
+      setAiInsights(null);
+      setAiError(null);
       setActiveTab("resumen");
     };
     reader.readAsText(file);
@@ -1311,6 +1319,100 @@ export default function DataPulse() {
         )}
 
       </div>
+
+      {/* ── AI INSIGHTS PANEL (always visible when data loaded) ── */}
+      <div style={{ padding: "0 24px 48px" }}>
+        <div style={{ borderTop: `1px solid ${B.cardBorder}`, paddingTop: 24 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+            <div>
+              <h2 style={{ fontSize: 16, fontWeight: 700, margin: "0 0 4px", background: `linear-gradient(135deg, #A78BFA, #60A5FA)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+                ✨ Insights con IA
+              </h2>
+              <p style={{ color: B.textMuted, fontSize: 12, margin: 0 }}>
+                Gemini analiza el resumen estadístico de tu dataset (no el CSV completo).
+              </p>
+            </div>
+            <button
+              disabled={aiLoading}
+              onClick={async () => {
+                setAiLoading(true);
+                setAiError(null);
+                setAiInsights(null);
+                try {
+                  const result = await generateAIInsights(headers, rows, types, statsMap, quality);
+                  setAiInsights(result);
+                } catch (err) {
+                  setAiError(err.message);
+                } finally {
+                  setAiLoading(false);
+                }
+              }}
+              style={{
+                background: aiLoading ? "rgba(167,139,250,0.08)" : "linear-gradient(135deg, rgba(167,139,250,0.2), rgba(96,165,250,0.2))",
+                border: "1px solid rgba(167,139,250,0.4)",
+                color: aiLoading ? B.textMuted : "#C4B5FD",
+                borderRadius: 10, padding: "10px 20px", cursor: aiLoading ? "not-allowed" : "pointer",
+                fontSize: 13, fontFamily: "inherit", fontWeight: 600,
+                display: "flex", alignItems: "center", gap: 8, transition: "all 0.2s",
+              }}
+            >
+              {aiLoading
+                ? <><span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</span> Analizando...</>
+                : "✨ Generar insights con IA"}
+            </button>
+          </div>
+
+          {/* No API key message */}
+          {aiError === "NO_API_KEY" && (
+            <div style={{ padding: "16px 20px", background: "rgba(139,92,246,0.06)", border: "1px solid rgba(139,92,246,0.25)", borderRadius: 12, fontSize: 13, lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 700, color: "#C4B5FD", marginBottom: 8 }}>🔑 Configura tu API key de Gemini</div>
+              <ol style={{ color: B.textSecondary, margin: "0 0 0 16px", padding: 0 }}>
+                <li>Obtén una key gratuita en <strong style={{ color: "#A78BFA" }}>aistudio.google.com/app/apikey</strong></li>
+                <li>Crea el archivo <code style={{ color: B.accent, background: "rgba(16,185,129,0.1)", padding: "1px 5px", borderRadius: 3 }}>.env</code> en la raíz del proyecto</li>
+                <li>Agrega: <code style={{ color: B.accent, background: "rgba(16,185,129,0.1)", padding: "1px 5px", borderRadius: 3 }}>VITE_GEMINI_API_KEY=tu_key_aqui</code></li>
+                <li>Reinicia el servidor de desarrollo (<code style={{ color: B.accent }}>npm run dev</code>)</li>
+              </ol>
+            </div>
+          )}
+
+          {/* Quota / auth errors */}
+          {aiError && aiError !== "NO_API_KEY" && (
+            <div style={{ padding: "14px 18px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 10, fontSize: 13, color: "#FCA5A5" }}>
+              {aiError === "QUOTA_EXCEEDED" && "⏱️ Cuota de la API agotada. Espera unos minutos e intenta de nuevo (Gemini free tier: 15 req/min)."}
+              {aiError === "API_KEY_INVALID" && "🚫 API key inválida o sin permisos. Verifica tu key en aistudio.google.com/app/apikey"}
+              {aiError === "EMPTY_RESPONSE" && "⚠️ Gemini devolvió una respuesta vacía. Intenta de nuevo."}
+              {!["QUOTA_EXCEEDED", "API_KEY_INVALID", "EMPTY_RESPONSE"].includes(aiError) && `⚠️ Error: ${aiError}`}
+            </div>
+          )}
+
+          {/* Loading skeleton */}
+          {aiLoading && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {[80, 60, 90, 55, 70].map((w, i) => (
+                <div key={i} style={{ height: 14, background: `linear-gradient(90deg, ${B.cardBorder} 25%, rgba(167,139,250,0.1) 50%, ${B.cardBorder} 75%)`, borderRadius: 7, width: `${w}%`, backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite" }} />
+              ))}
+            </div>
+          )}
+
+          {/* AI results */}
+          {aiInsights && !aiLoading && (
+            <div style={{ padding: "18px 20px", background: "rgba(139,92,246,0.06)", border: "1px solid rgba(139,92,246,0.2)", borderRadius: 12 }}>
+              <div style={{ fontSize: 11, color: "#A78BFA", marginBottom: 12, letterSpacing: "0.08em", fontWeight: 600 }}>GEMINI 2.0 FLASH · ANÁLISIS IA</div>
+              <div style={{ fontSize: 13, color: B.textSecondary, lineHeight: 1.9, whiteSpace: "pre-wrap" }}>
+                {aiInsights}
+              </div>
+              <div style={{ marginTop: 14, fontSize: 11, color: B.textMuted }}>
+                ⚠️ Los insights de IA complementan — no reemplazan — el análisis estadístico. Verifica las conclusiones con tus datos.
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+      `}</style>
     </div>
   );
 }
