@@ -86,18 +86,34 @@ function fmt(n, d = 2) {
 
 // ── Histogram ────────────────────────────────────────────────────
 function computeHistogram(values, bins = 15) {
-  const nums = values.filter(v => v !== "" && !isNaN(toNum(v))).map(toNum);
+  // Guard: filter nulls/undefined/empty/NaN before mapping
+  const nums = values
+    .filter(v => v != null && v !== "" && !isNaN(toNum(v)))
+    .map(toNum)
+    .filter(isFinite);
   if (nums.length === 0) return [];
-  const min = Math.min(...nums);
-  const max = Math.max(...nums);
+
+  // Use loop instead of spread to avoid stack overflow on large arrays
+  let min = nums[0], max = nums[0];
+  for (const n of nums) {
+    if (n < min) min = n;
+    if (n > max) max = n;
+  }
   if (min === max) return [{ label: fmt(min, 1), count: nums.length }];
-  const step = (max - min) / bins;
-  const buckets = Array.from({ length: bins }, (_, i) => ({
+
+  // For low-cardinality columns (binary 0/1, etc.) use unique count as bins
+  const uniqueCount = new Set(nums).size;
+  const effectiveBins = uniqueCount <= 10
+    ? uniqueCount
+    : Math.max(5, Math.min(bins, 20));
+
+  const step = (max - min) / effectiveBins;
+  const buckets = Array.from({ length: effectiveBins }, (_, i) => ({
     label: fmt(min + i * step, 1),
     count: 0,
   }));
   nums.forEach(v => {
-    const i = Math.min(Math.floor((v - min) / step), bins - 1);
+    const i = Math.min(Math.floor((v - min) / step), effectiveBins - 1);
     buckets[i].count++;
   });
   return buckets;
@@ -817,7 +833,7 @@ export default function DataPulse() {
                             <BarChart data={histData} margin={{ top: 0, right: 0, left: -30, bottom: 0 }}>
                               <XAxis dataKey="label" tick={{ fill: B.textMuted, fontSize: 9 }} interval="preserveStartEnd" />
                               <YAxis tick={{ fill: B.textMuted, fontSize: 9 }} />
-                              <Tooltip content={<CustomTooltip />} />
+                              <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
                               <Bar dataKey="count" fill={B.purple} radius={[2, 2, 0, 0]} fillOpacity={0.8} />
                             </BarChart>
                           </ResponsiveContainer>
@@ -856,7 +872,7 @@ export default function DataPulse() {
                             <CartesianGrid strokeDasharray="3 3" stroke={B.cardBorder} />
                             <XAxis dataKey="label" tick={{ fill: B.textMuted, fontSize: 10 }} angle={-35} textAnchor="end" interval={0} />
                             <YAxis tick={{ fill: B.textMuted, fontSize: 10 }} />
-                            <Tooltip content={<CustomTooltip />} />
+                            <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
                             <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                               {chartData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                             </Bar>
@@ -1010,16 +1026,22 @@ export default function DataPulse() {
                 {explorerY && <> vs <strong style={{ color: B.accent }}>{explorerY}</strong></>}
                 <span style={{ color: B.textMuted, marginLeft: 8 }}>({filteredRows.length.toLocaleString()} registros)</span>
               </div>
-              {explorerType === "scatter" && numericCols.includes(explorerX) ? (
+              {explorerType === "scatter" ? (
+                numericCols.includes(explorerX) ? (
                 <ResponsiveContainer width="100%" height={360}>
                   <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke={B.cardBorder} />
-                    <XAxis dataKey="x" name={explorerX} tick={{ fill: B.textMuted, fontSize: 11 }} label={{ value: explorerX, position: "insideBottom", offset: -10, fill: B.textMuted, fontSize: 11 }} />
-                    <YAxis dataKey="y" name={explorerY || "índice"} tick={{ fill: B.textMuted, fontSize: 11 }} />
-                    <Tooltip content={<ScatterTooltip />} />
-                    <Scatter data={explorerData} fill={B.accent} fillOpacity={0.7} />
+                    <XAxis type="number" dataKey="x" name={explorerX} tick={{ fill: B.textMuted, fontSize: 11 }} label={{ value: explorerX, position: "insideBottom", offset: -10, fill: B.textMuted, fontSize: 11 }} />
+                    <YAxis type="number" dataKey="y" name={explorerY || "índice"} tick={{ fill: B.textMuted, fontSize: 11 }} />
+                    <Tooltip content={<ScatterTooltip />} cursor={{ fill: "transparent" }} />
+                    <Scatter data={explorerData.slice(0, 500)} fill={B.accent} fillOpacity={0.65} r={3} />
                   </ScatterChart>
                 </ResponsiveContainer>
+                ) : (
+                  <div style={{ height: 360, display: "flex", alignItems: "center", justifyContent: "center", color: B.textMuted, fontSize: 13 }}>
+                    Selecciona una columna numérica en Eje X para usar el gráfico de dispersión.
+                  </div>
+                )
               ) : explorerType === "line" ? (
                 <ResponsiveContainer width="100%" height={360}>
                   <LineChart data={explorerData} margin={{ top: 10, right: 20, bottom: 40, left: 0 }}>
@@ -1036,7 +1058,7 @@ export default function DataPulse() {
                     <CartesianGrid strokeDasharray="3 3" stroke={B.cardBorder} />
                     <XAxis dataKey="label" tick={{ fill: B.textMuted, fontSize: 10 }} angle={-35} textAnchor="end" interval={0} />
                     <YAxis tick={{ fill: B.textMuted, fontSize: 11 }} />
-                    <Tooltip content={<CustomTooltip />} />
+                    <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
                     <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                       {explorerData.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                     </Bar>
