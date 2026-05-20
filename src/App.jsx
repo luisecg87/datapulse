@@ -85,38 +85,52 @@ function fmt(n, d = 2) {
 }
 
 // ── Histogram ────────────────────────────────────────────────────
-function computeHistogram(values, bins = 15) {
-  // Guard: filter nulls/undefined/empty/NaN before mapping
+function fmtBinLabel(n) {
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+function computeHistogram(values) {
+  // 1. Filter nulls/undefined/empty/NaN — values arrive as strings from CSV
   const nums = values
     .filter(v => v != null && v !== "" && !isNaN(toNum(v)))
     .map(toNum)
     .filter(isFinite);
   if (nums.length === 0) return [];
 
-  // Use loop instead of spread to avoid stack overflow on large arrays
+  // 2. For low-cardinality columns (binary 0/1, enums, etc.) — direct count
+  const unique = [...new Set(nums)];
+  if (unique.length <= 5) {
+    const conteo = {};
+    nums.forEach(v => { conteo[v] = (conteo[v] || 0) + 1; });
+    return Object.entries(conteo)
+      .map(([val, count]) => ({ rango: fmtBinLabel(Number(val)), count }))
+      .sort((a, b) => Number(a.rango.replace(/[KM]$/, "")) - Number(b.rango.replace(/[KM]$/, "")));
+  }
+
+  // 3. Adaptive bins for large/normal ranges — loop avoids spread stack overflow
   let min = nums[0], max = nums[0];
   for (const n of nums) {
     if (n < min) min = n;
     if (n > max) max = n;
   }
-  if (min === max) return [{ label: fmt(min, 1), count: nums.length }];
+  if (min === max) return [{ rango: fmtBinLabel(min), count: nums.length }];
 
-  // For low-cardinality columns (binary 0/1, etc.) use unique count as bins
-  const uniqueCount = new Set(nums).size;
-  const effectiveBins = uniqueCount <= 10
-    ? uniqueCount
-    : Math.max(5, Math.min(bins, 20));
+  const numBins = Math.min(20, Math.max(5, Math.ceil(Math.sqrt(nums.length))));
+  const step = (max - min) / numBins;
 
-  const step = (max - min) / effectiveBins;
-  const buckets = Array.from({ length: effectiveBins }, (_, i) => ({
-    label: fmt(min + i * step, 1),
+  const buckets = Array.from({ length: numBins }, (_, i) => ({
+    rango: fmtBinLabel(min + i * step),
     count: 0,
   }));
   nums.forEach(v => {
-    const i = Math.min(Math.floor((v - min) / step), effectiveBins - 1);
+    const i = Math.min(Math.floor((v - min) / step), numBins - 1);
     buckets[i].count++;
   });
-  return buckets;
+
+  // 4. Drop empty bins so Recharts always has data to render
+  return buckets.filter(b => b.count > 0);
 }
 
 // ── Data Quality ─────────────────────────────────────────────────
@@ -831,9 +845,13 @@ export default function DataPulse() {
                           <div style={{ fontSize: 10, color: B.textMuted, marginBottom: 6 }}>Distribución</div>
                           <ResponsiveContainer width="100%" height={80}>
                             <BarChart data={histData} margin={{ top: 0, right: 0, left: -30, bottom: 0 }}>
-                              <XAxis dataKey="label" tick={{ fill: B.textMuted, fontSize: 9 }} interval="preserveStartEnd" />
+                              <XAxis dataKey="rango" tick={{ fill: B.textMuted, fontSize: 9 }} interval="preserveStartEnd" />
                               <YAxis tick={{ fill: B.textMuted, fontSize: 9 }} />
-                              <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.05)" }} />
+                              <Tooltip
+                                content={<CustomTooltip />}
+                                cursor={{ fill: "rgba(128,128,128,0.1)" }}
+                                contentStyle={{ background: B.card, border: `0.5px solid ${B.cardBorder}`, borderRadius: 8, fontSize: 12 }}
+                              />
                               <Bar dataKey="count" fill={B.purple} radius={[2, 2, 0, 0]} fillOpacity={0.8} />
                             </BarChart>
                           </ResponsiveContainer>
