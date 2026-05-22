@@ -429,6 +429,177 @@ function SectionHeader({ title, sub }) {
   );
 }
 
+// ── Data Explorer ─────────────────────────────────────────────────
+const PAGE_SIZE = 25;
+
+function DataExplorer({ headers, rows }) {
+  const [search, setSearch]       = useState("");
+  const [filterCol, setFilterCol] = useState("__all__");
+  const [filterVal, setFilterVal] = useState("");
+  const [sortCol, setSortCol]     = useState(null);
+  const [sortDir, setSortDir]     = useState("asc");
+  const [page, setPage]           = useState(0);
+
+  const processed = useMemo(() => {
+    let result = rows;
+    const q = search.trim().toLowerCase();
+    if (q) result = result.filter(r => r.some(v => v.toLowerCase().includes(q)));
+    const fq = filterVal.trim().toLowerCase();
+    if (fq && filterCol !== "__all__") {
+      const ci = headers.indexOf(filterCol);
+      if (ci !== -1) result = result.filter(r => r[ci].toLowerCase().includes(fq));
+    }
+    if (sortCol !== null) {
+      const ci = headers.indexOf(sortCol);
+      result = [...result].sort((a, b) => {
+        const av = a[ci], bv = b[ci];
+        const an = Number(av.replace(",", ".")), bn = Number(bv.replace(",", "."));
+        const cmp = !isNaN(an) && !isNaN(bn) ? an - bn : av.localeCompare(bv, "es");
+        return sortDir === "asc" ? cmp : -cmp;
+      });
+    }
+    return result;
+  }, [rows, headers, search, filterCol, filterVal, sortCol, sortDir]);
+
+  const totalPages = Math.ceil(processed.length / PAGE_SIZE);
+  const pageRows   = processed.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const startRow   = processed.length === 0 ? 0 : page * PAGE_SIZE + 1;
+  const endRow     = Math.min((page + 1) * PAGE_SIZE, processed.length);
+
+  function toggleSort(col) {
+    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("asc"); }
+    setPage(0);
+  }
+
+  function handleSearch(v) { setSearch(v); setPage(0); }
+  function handleFilterCol(v) { setFilterCol(v); setFilterVal(""); setPage(0); }
+  function handleFilterVal(v) { setFilterVal(v); setPage(0); }
+
+  function exportCSV() {
+    const esc = v => (v.includes(",") || v.includes('"') || v.includes("\n")) ? `"${v.replace(/"/g, '""')}"` : v;
+    const content = [headers.map(esc).join(","), ...processed.map(r => r.map(esc).join(","))].join("\n");
+    downloadFile(content, "datapulse_filtrado.csv", "text/csv");
+  }
+
+  const inputBase = {
+    background: B.surface, border: `1px solid ${B.cardBorder}`, borderRadius: 8,
+    color: B.textPrimary, fontSize: 12, padding: "7px 12px", fontFamily: "inherit", outline: "none",
+  };
+
+  return (
+    <div style={{ ...card, marginTop: 0 }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Ico d={IC.table} size={14} color={B.accent} />
+          <span style={{ fontSize: 13, fontWeight: 700, color: B.textPrimary }}>Explorador de datos</span>
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: B.accentSoft, border: `1px solid ${B.accent}33`, borderRadius: 8, color: B.accent, fontSize: 12, fontWeight: 600, padding: "6px 14px", cursor: "pointer", fontFamily: "inherit" }}
+        >
+          <Ico d={IC.download} size={13} color={B.accent} />
+          Exportar filtrado
+        </button>
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: "1 1 180px", minWidth: 140 }}>
+          <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", display: "flex" }}>
+            <Ico d={IC.search} size={13} color={B.textMuted} />
+          </span>
+          <input
+            value={search}
+            onChange={e => handleSearch(e.target.value)}
+            placeholder="Buscar en todas las columnas…"
+            style={{ ...inputBase, width: "100%", paddingLeft: 32, boxSizing: "border-box" }}
+          />
+        </div>
+        <select
+          value={filterCol}
+          onChange={e => handleFilterCol(e.target.value)}
+          style={{ ...inputBase, cursor: "pointer" }}
+        >
+          <option value="__all__">Todas las columnas</option>
+          {headers.map(h => <option key={h} value={h}>{h}</option>)}
+        </select>
+        {filterCol !== "__all__" && (
+          <input
+            value={filterVal}
+            onChange={e => handleFilterVal(e.target.value)}
+            placeholder={`Filtrar "${filterCol}"…`}
+            style={{ ...inputBase, flex: "1 1 140px", minWidth: 120 }}
+          />
+        )}
+      </div>
+
+      {/* Table */}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%", minWidth: 400 }}>
+          <thead>
+            <tr style={{ background: "rgba(26,43,74,0.5)" }}>
+              <th style={{ padding: "7px 10px", color: B.textMuted, fontWeight: 600, textAlign: "center", whiteSpace: "nowrap" }}>#</th>
+              {headers.map(h => (
+                <th
+                  key={h}
+                  onClick={() => toggleSort(h)}
+                  style={{ padding: "7px 10px", color: sortCol === h ? B.accent : B.textMuted, fontWeight: 600, textAlign: "left", whiteSpace: "nowrap", cursor: "pointer", userSelect: "none" }}
+                >
+                  {h}&nbsp;<span style={{ opacity: sortCol === h ? 1 : 0.35, fontSize: 10 }}>{sortCol === h ? (sortDir === "asc" ? "↑" : "↓") : "↕"}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {pageRows.length === 0 ? (
+              <tr>
+                <td colSpan={headers.length + 1} style={{ padding: "24px 10px", textAlign: "center", color: B.textMuted, fontSize: 13 }}>
+                  Sin resultados para los filtros actuales.
+                </td>
+              </tr>
+            ) : pageRows.map((r, ri) => (
+              <tr key={ri} style={{ borderTop: `1px solid ${B.cardBorder}`, background: ri % 2 === 1 ? "rgba(26,43,74,0.18)" : "transparent" }}>
+                <td style={{ padding: "6px 10px", color: B.textMuted, textAlign: "center" }}>{startRow + ri}</td>
+                {r.map((v, ci) => (
+                  <td key={ci} style={{ padding: "6px 10px", color: B.textSecondary, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {v || "—"}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Footer: counter + pagination */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12, flexWrap: "wrap", gap: 8 }}>
+        <span style={{ fontSize: 11, color: B.textMuted }}>
+          {processed.length === 0
+            ? "Sin resultados"
+            : `Mostrando ${startRow}–${endRow} de ${processed.length.toLocaleString()} filas`}
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button
+            onClick={() => setPage(p => Math.max(0, p - 1))}
+            disabled={page === 0}
+            style={{ background: B.surface, border: `1px solid ${B.cardBorder}`, borderRadius: 6, color: B.textSecondary, fontSize: 12, padding: "5px 12px", cursor: page === 0 ? "default" : "pointer", fontFamily: "inherit", opacity: page === 0 ? 0.4 : 1 }}
+          >← Ant.</button>
+          <span style={{ fontSize: 11, color: B.textMuted, minWidth: 52, textAlign: "center" }}>
+            {totalPages === 0 ? "0 / 0" : `${page + 1} / ${totalPages}`}
+          </span>
+          <button
+            onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+            disabled={page >= totalPages - 1}
+            style={{ background: B.surface, border: `1px solid ${B.cardBorder}`, borderRadius: 6, color: B.textSecondary, fontSize: 12, padding: "5px 12px", cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "inherit", opacity: page >= totalPages - 1 ? 0.4 : 1 }}
+          >Sig. →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────
 export default function DataPulse() {
   const [data, setData]         = useState(null);
@@ -923,6 +1094,9 @@ export default function DataPulse() {
                   </table>
                 </div>
               </div>
+
+              {/* Data Explorer */}
+              <DataExplorer headers={headers} rows={filteredRows} />
 
               {/* Numeric columns */}
               {numericCols.length > 0 && (
