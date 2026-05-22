@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useRef } from "react";
+import * as XLSX from "xlsx";
 import { generateAIInsights } from "./services/geminiInsights";
 import {
   BarChart, Bar, LineChart, Line, ScatterChart, Scatter,
@@ -293,6 +294,22 @@ function buildCleanCSV(headers, rows) {
   return [headers.map(esc).join(","), ...cleanRows.map(r => r.map(esc).join(","))].join("\n");
 }
 
+function parseExcelSheet(workbook, sheetName) {
+  const sheet = workbook.Sheets[sheetName];
+  const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  if (data.length < 2) return { headers: [], rows: [] };
+  const headers = data[0].map(h => String(h ?? "").trim());
+  const len = headers.length;
+  const rows = data.slice(1)
+    .filter(r => r.some(v => v !== "" && v != null))
+    .map(r => {
+      const cells = r.map(v => (v == null ? "" : String(v).trim()));
+      while (cells.length < len) cells.push("");
+      return cells.slice(0, len);
+    });
+  return { headers, rows };
+}
+
 // ── SVG Icon system ───────────────────────────────────────────────
 const IC = {
   chart:    "M3 3v18h18M7 16l4-4 4 4 4-8",
@@ -430,58 +447,81 @@ export default function DataPulse() {
   const [aiLoading, setAiLoading]   = useState(false);
   const [aiError, setAiError]       = useState(null);
 
+  // Excel multi-sheet state
+  const [pendingWorkbook, setPendingWorkbook] = useState(null);
+  const [sheetNames, setSheetNames]           = useState([]);
+  const [activeSheet, setActiveSheet]         = useState("");
+
   const fileRef = useRef();
+
+  const analyzeData = useCallback((parsed) => {
+    if (parsed.rows.length === 0) return;
+    setData(parsed);
+    const types = parsed.headers.map((_, i) => detectType(parsed.rows.map(r => r[i])));
+    const statsMap = {};
+    parsed.headers.forEach((h, i) => { if (types[i] === "numeric") statsMap[h] = computeStats(parsed.rows.map(r => r[i])); });
+    const numericCols = parsed.headers.filter((_, i) => types[i] === "numeric");
+    const correlations = [];
+    for (let i = 0; i < numericCols.length; i++) {
+      for (let j = i + 1; j < numericCols.length; j++) {
+        const ai = parsed.headers.indexOf(numericCols[i]);
+        const bi = parsed.headers.indexOf(numericCols[j]);
+        const r = computeCorrelation(parsed.rows.map(r => r[ai]), parsed.rows.map(r => r[bi]));
+        if (r != null) correlations.push({ a: numericCols[i], b: numericCols[j], r });
+      }
+    }
+    const catBreakdowns = {};
+    parsed.headers.forEach((h, i) => {
+      if (types[i] === "categorical") {
+        const counts = {};
+        parsed.rows.forEach(r => { const v = r[i]; if (v) counts[v] = (counts[v] || 0) + 1; });
+        catBreakdowns[h] = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([label, value]) => ({ label, value }));
+      }
+    });
+    const initCat = {};
+    parsed.headers.forEach((h, i) => {
+      if (types[i] === "categorical") initCat[h] = new Set([...new Set(parsed.rows.map(r => r[i]).filter(Boolean))]);
+    });
+    const initNum = {};
+    parsed.headers.forEach((h, i) => {
+      if (types[i] === "numeric" && statsMap[h]) initNum[h] = [statsMap[h].min, statsMap[h].max];
+    });
+    const quality = computeDataQuality(parsed.headers, parsed.rows, types, statsMap);
+    const insights = generateInsights(parsed.headers, parsed.rows, types, statsMap, correlations);
+    const recommendations = generateRecommendations(parsed.headers, parsed.rows, types, statsMap, correlations, quality);
+    setCatFilters(initCat);
+    setNumFilters(initNum);
+    setExplorerX(numericCols[0] || "");
+    setExplorerY(numericCols[1] || numericCols[0] || "");
+    setAnalysis({ types, statsMap, correlations, catBreakdowns, insights, quality, recommendations });
+    setAiInsights(null); setAiError(null);
+    setActiveTab("resumen");
+  }, []);
 
   const handleFile = useCallback((file) => {
     if (!file) return;
     setFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const parsed = parseCSV(e.target.result);
-      if (parsed.rows.length === 0) return;
-      setData(parsed);
-      const types = parsed.headers.map((_, i) => detectType(parsed.rows.map(r => r[i])));
-      const statsMap = {};
-      parsed.headers.forEach((h, i) => { if (types[i] === "numeric") statsMap[h] = computeStats(parsed.rows.map(r => r[i])); });
-      const numericCols = parsed.headers.filter((_, i) => types[i] === "numeric");
-      const correlations = [];
-      for (let i = 0; i < numericCols.length; i++) {
-        for (let j = i + 1; j < numericCols.length; j++) {
-          const ai = parsed.headers.indexOf(numericCols[i]);
-          const bi = parsed.headers.indexOf(numericCols[j]);
-          const r = computeCorrelation(parsed.rows.map(r => r[ai]), parsed.rows.map(r => r[bi]));
-          if (r != null) correlations.push({ a: numericCols[i], b: numericCols[j], r });
+    const ext = file.name.split(".").pop().toLowerCase();
+
+    if (ext === "xlsx" || ext === "xls") {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: "array" });
+        if (wb.SheetNames.length === 1) {
+          analyzeData(parseExcelSheet(wb, wb.SheetNames[0]));
+        } else {
+          setPendingWorkbook(wb);
+          setSheetNames(wb.SheetNames);
+          setActiveSheet(wb.SheetNames[0]);
         }
-      }
-      const catBreakdowns = {};
-      parsed.headers.forEach((h, i) => {
-        if (types[i] === "categorical") {
-          const counts = {};
-          parsed.rows.forEach(r => { const v = r[i]; if (v) counts[v] = (counts[v] || 0) + 1; });
-          catBreakdowns[h] = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([label, value]) => ({ label, value }));
-        }
-      });
-      const initCat = {};
-      parsed.headers.forEach((h, i) => {
-        if (types[i] === "categorical") initCat[h] = new Set([...new Set(parsed.rows.map(r => r[i]).filter(Boolean))]);
-      });
-      const initNum = {};
-      parsed.headers.forEach((h, i) => {
-        if (types[i] === "numeric" && statsMap[h]) initNum[h] = [statsMap[h].min, statsMap[h].max];
-      });
-      const quality = computeDataQuality(parsed.headers, parsed.rows, types, statsMap);
-      const insights = generateInsights(parsed.headers, parsed.rows, types, statsMap, correlations);
-      const recommendations = generateRecommendations(parsed.headers, parsed.rows, types, statsMap, correlations, quality);
-      setCatFilters(initCat);
-      setNumFilters(initNum);
-      setExplorerX(numericCols[0] || "");
-      setExplorerY(numericCols[1] || numericCols[0] || "");
-      setAnalysis({ types, statsMap, correlations, catBreakdowns, insights, quality, recommendations });
-      setAiInsights(null); setAiError(null);
-      setActiveTab("resumen");
-    };
-    reader.readAsText(file);
-  }, []);
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => analyzeData(parseCSV(e.target.result));
+      reader.readAsText(file);
+    }
+  }, [analyzeData]);
 
   const filteredRows = useMemo(() => {
     if (!data) return [];
@@ -500,6 +540,7 @@ export default function DataPulse() {
 
   const onDrop = useCallback((e) => {
     e.preventDefault(); setDragOver(false);
+    setPendingWorkbook(null); setSheetNames([]); setActiveSheet("");
     handleFile(e.dataTransfer.files[0]);
   }, [handleFile]);
 
@@ -527,7 +568,7 @@ export default function DataPulse() {
   }, [data, analysis, explorerX, explorerY, filteredRows]);
 
   // ── Upload screen ─────────────────────────────────────────────────
-  if (!data) {
+  if (!data && !pendingWorkbook) {
     const features = ["Calidad de datos", "KPIs automáticos", "Histogramas", "Correlaciones", "Insights IA", "Exportar informe"];
     return (
       <div style={{ minHeight: "100vh", background: B.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'JetBrains Mono', monospace", padding: 24, position: "relative", overflow: "hidden" }}>
@@ -547,7 +588,7 @@ export default function DataPulse() {
           </h1>
           <p style={{ color: B.textMuted, fontSize: 12, margin: "0 0 6px", letterSpacing: "0.12em", textTransform: "uppercase" }}>by ErnestoLab</p>
           <p style={{ color: B.textSecondary, fontSize: 14, margin: "0 0 24px", lineHeight: 1.6 }}>
-            Analista automático de CSV para PYMEs · 100% local · sin servidor
+            Analista automático de CSV y Excel para PYMEs · 100% local · sin servidor
           </p>
 
           {/* Feature pills */}
@@ -577,16 +618,85 @@ export default function DataPulse() {
               </div>
             </div>
             <p style={{ color: B.textPrimary, fontSize: 15, margin: "0 0 6px", fontWeight: 600 }}>
-              {dragOver ? "Suelta el archivo aquí" : "Arrastra tu CSV aquí"}
+              {dragOver ? "Suelta el archivo aquí" : "Arrastra tu CSV o Excel aquí"}
             </p>
-            <p style={{ color: B.textMuted, fontSize: 13, margin: 0 }}>o haz clic para seleccionar archivo</p>
-            <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
+            <p style={{ color: B.textMuted, fontSize: 13, margin: 0 }}>o haz clic para seleccionar archivo (.csv, .xlsx, .xls)</p>
+            <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" style={{ display: "none" }} onChange={(e) => { setPendingWorkbook(null); handleFile(e.target.files[0]); }} />
           </div>
 
           {/* Privacy notice */}
           <div style={{ marginTop: 16, padding: "12px 16px", background: B.highlightSoft, border: `1px solid rgba(245,166,35,0.2)`, borderRadius: 10, fontSize: 12, color: B.textMuted, lineHeight: 1.6, textAlign: "left" }}>
             <span style={{ color: B.highlight, fontWeight: 600 }}>Aviso de privacidad:</span> Los datos se procesan{" "}
             <strong style={{ color: B.textSecondary }}>exclusivamente en tu navegador</strong> y nunca se envían a servidores externos.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Sheet selector (Excel multi-hoja) ────────────────────────────
+  if (pendingWorkbook && sheetNames.length > 1) {
+    return (
+      <div style={{ minHeight: "100vh", background: B.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'JetBrains Mono', monospace", padding: 24 }}>
+        <div style={{ width: "100%", maxWidth: 480 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: B.accentSoft, border: `1px solid rgba(0,212,255,0.35)`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Ico d={IC.table} size={14} color={B.accent} sw={2} />
+            </div>
+            <span style={{ fontSize: 14, fontWeight: 800, background: `linear-gradient(135deg, ${B.accent}, ${B.purple})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>DataPulse</span>
+          </div>
+
+          <div style={{ ...card, marginBottom: 0 }}>
+            <div style={{ fontSize: 10, color: B.textMuted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>Archivo Excel</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
+              <Ico d={IC.file} size={13} color={B.textMuted} />
+              <span style={{ fontSize: 13, color: B.textPrimary, fontWeight: 600 }}>{fileName}</span>
+            </div>
+
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.textPrimary, marginBottom: 4 }}>Selecciona una hoja</div>
+            <p style={{ fontSize: 12, color: B.textMuted, margin: "0 0 16px" }}>
+              El archivo contiene {sheetNames.length} hojas. Elige cuál analizar.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+              {sheetNames.map((name, i) => {
+                const isActive = activeSheet === name;
+                return (
+                  <button key={name} onClick={() => setActiveSheet(name)} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 8,
+                    border: `1px solid ${isActive ? B.accent : B.cardBorder}`,
+                    background: isActive ? B.accentSoft : "transparent",
+                    color: isActive ? B.accent : B.textSecondary,
+                    cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: isActive ? 600 : 400,
+                    textAlign: "left", transition: "all 0.15s",
+                  }}>
+                    <Ico d={IC.table} size={14} color={isActive ? B.accent : B.textMuted} />
+                    <span style={{ flex: 1 }}>{name}</span>
+                    {isActive && <Ico d={IC.check} size={14} color={B.accent} />}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => { setPendingWorkbook(null); setSheetNames([]); setActiveSheet(""); setFileName(""); }}
+                style={{ flex: 1, padding: "10px", borderRadius: 8, border: `1px solid ${B.cardBorder}`, background: "transparent", color: B.textMuted, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  const parsed = parseExcelSheet(pendingWorkbook, activeSheet);
+                  setPendingWorkbook(null); setSheetNames([]); setActiveSheet("");
+                  analyzeData(parsed);
+                }}
+                style={{ flex: 2, padding: "10px", borderRadius: 8, border: `1px solid ${B.accent}`, background: B.accentSoft, color: B.accent, cursor: "pointer", fontSize: 13, fontFamily: "inherit", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+              >
+                <Ico d={IC.chart} size={14} color={B.accent} />
+                Analizar "{activeSheet}"
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -716,7 +826,7 @@ export default function DataPulse() {
           )}
 
           <button
-            onClick={() => { setData(null); setAnalysis(null); setFileName(""); setCatFilters({}); setNumFilters({}); setAiInsights(null); }}
+            onClick={() => { setData(null); setAnalysis(null); setFileName(""); setCatFilters({}); setNumFilters({}); setAiInsights(null); setPendingWorkbook(null); setSheetNames([]); setActiveSheet(""); }}
             style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "8px 12px", borderRadius: 8, border: `1px solid ${B.cardBorder}`, background: "transparent", color: B.textMuted, cursor: "pointer", fontSize: 11, fontFamily: "inherit", transition: "all 0.15s" }}
           >
             <Ico d={IC.upload} size={12} color={B.textMuted} />
