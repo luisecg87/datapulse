@@ -611,19 +611,17 @@ function CleanBadge({ msg }) {
 }
 
 function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setCleanOps, nullStrats, setNullStrats, cleanFeedback, setCleanFeedback }) {
-  function getCurrent() {
-    return workingData ?? { headers: [...originalData.headers], rows: originalData.rows.map(r => [...r]) };
-  }
-
-  const current = getCurrent();
+  // Stable copy — only recomputed when workingData or originalData actually changes,
+  // not on every render. This prevents blocking the main thread on each re-render.
+  const current = useMemo(() =>
+    workingData ?? { headers: [...originalData.headers], rows: originalData.rows.map(r => [...r]) },
+    [workingData, originalData]
+  );
 
   const dupCount = useMemo(() => {
     const seen = new Set();
     let count = 0;
-    for (const r of current.rows) {
-      const key = r.join("|");
-      if (seen.has(key)) count++; else seen.add(key);
-    }
+    for (const r of current.rows) { const key = r.join("|"); if (seen.has(key)) count++; else seen.add(key); }
     return count;
   }, [current.rows]);
 
@@ -632,7 +630,7 @@ function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setC
       const count = current.rows.filter(r => !r[i] || r[i].trim() === "").length;
       return count > 0 ? { col: h, idx: i, count } : null;
     }).filter(Boolean),
-  [current]);
+  [current.rows, current.headers]);
 
   const normalizedHeaders = useMemo(() =>
     current.headers.map(h =>
@@ -654,7 +652,7 @@ function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setC
 
   function removeDuplicates() {
     if (dupCount === 0) return;
-    const w = getCurrent();
+    const w = current;
     const seen = new Set();
     const newRows = w.rows.filter(r => { const k = r.join("|"); if (seen.has(k)) return false; seen.add(k); return true; });
     const removed = w.rows.length - newRows.length;
@@ -665,7 +663,7 @@ function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setC
 
   function applyNullFill(colName, colIdx) {
     const strategy = nullStrats[colName] || "mean";
-    const w = getCurrent();
+    const w = current;
     const nonNull = w.rows.map(r => r[colIdx]).filter(v => v && v.trim() !== "");
 
     let fillValue = "0";
@@ -703,7 +701,7 @@ function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setC
 
   function normalizeHeaders() {
     if (!headersNeedNorm) return;
-    const w = getCurrent();
+    const w = current;
     const changed = normalizedHeaders.filter((n, i) => n !== w.headers[i]).length;
     setWorkingData({ ...w, headers: normalizedHeaders });
     setCleanOps(o => ({ ...o, colsNormalized: o.colsNormalized + changed }));
@@ -718,7 +716,7 @@ function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setC
   }
 
   function exportCSV() {
-    const w = getCurrent();
+    const w = current;
     const esc = v => (v.includes(",") || v.includes('"') || v.includes("\n")) ? `"${v.replace(/"/g, '""')}"` : v;
     downloadFile([w.headers.map(esc).join(","), ...w.rows.map(r => r.map(esc).join(","))].join("\n"), "datapulse_limpio.csv", "text/csv");
   }
