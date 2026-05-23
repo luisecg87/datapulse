@@ -600,6 +600,249 @@ function DataExplorer({ headers, rows }) {
   );
 }
 
+// ── Data Cleaner ──────────────────────────────────────────────────
+function CleanBadge({ msg }) {
+  if (!msg) return null;
+  return (
+    <span style={{ fontSize: 11, fontWeight: 600, color: B.green, background: B.greenSoft, border: `1px solid rgba(34,211,164,0.3)`, borderRadius: 6, padding: "3px 10px", whiteSpace: "nowrap" }}>
+      ✓ {msg}
+    </span>
+  );
+}
+
+function DataCleaner({ originalData, workingData, setWorkingData, cleanOps, setCleanOps, nullStrats, setNullStrats, cleanFeedback, setCleanFeedback }) {
+  function getCurrent() {
+    return workingData ?? { headers: [...originalData.headers], rows: originalData.rows.map(r => [...r]) };
+  }
+
+  const current = getCurrent();
+
+  const dupCount = useMemo(() => {
+    const seen = new Set();
+    let count = 0;
+    for (const r of current.rows) {
+      const key = r.join("|");
+      if (seen.has(key)) count++; else seen.add(key);
+    }
+    return count;
+  }, [current.rows]);
+
+  const nullCols = useMemo(() =>
+    current.headers.map((h, i) => {
+      const count = current.rows.filter(r => !r[i] || r[i].trim() === "").length;
+      return count > 0 ? { col: h, idx: i, count } : null;
+    }).filter(Boolean),
+  [current]);
+
+  const normalizedHeaders = useMemo(() =>
+    current.headers.map(h =>
+      h.toLowerCase()
+        .normalize("NFD").replace(/[̀-ͯ]/g, "")
+        .replace(/[\s-]+/g, "_")
+        .replace(/[^a-z0-9_]/g, "")
+        .replace(/^_+|_+$/g, "")
+        || "col"
+    ),
+  [current.headers]);
+
+  const headersNeedNorm = normalizedHeaders.some((n, i) => n !== current.headers[i]);
+
+  function flash(id, msg) {
+    setCleanFeedback(f => ({ ...f, [id]: msg }));
+    setTimeout(() => setCleanFeedback(f => { const n = { ...f }; delete n[id]; return n; }), 4000);
+  }
+
+  function removeDuplicates() {
+    if (dupCount === 0) return;
+    const w = getCurrent();
+    const seen = new Set();
+    const newRows = w.rows.filter(r => { const k = r.join("|"); if (seen.has(k)) return false; seen.add(k); return true; });
+    const removed = w.rows.length - newRows.length;
+    setWorkingData({ ...w, rows: newRows });
+    setCleanOps(o => ({ ...o, dupsRemoved: o.dupsRemoved + removed }));
+    flash("dups", `${removed} duplicado${removed !== 1 ? "s" : ""} eliminado${removed !== 1 ? "s" : ""}`);
+  }
+
+  function applyNullFill(colName, colIdx) {
+    const strategy = nullStrats[colName] || "mean";
+    const w = getCurrent();
+    const nonNull = w.rows.map(r => r[colIdx]).filter(v => v && v.trim() !== "");
+
+    let fillValue = "0";
+    if (strategy === "mean") {
+      const nums = nonNull.map(toNum).filter(n => !isNaN(n));
+      fillValue = nums.length > 0 ? String(+((nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(4))) : "0";
+    } else if (strategy === "median") {
+      const nums = [...nonNull.map(toNum).filter(n => !isNaN(n))].sort((a, b) => a - b);
+      const m = Math.floor(nums.length / 2);
+      fillValue = nums.length > 0 ? String(+(nums.length % 2 ? nums[m] : (nums[m - 1] + nums[m]) / 2).toFixed(4)) : "0";
+    } else if (strategy === "moda") {
+      const counts = {};
+      nonNull.forEach(v => counts[v] = (counts[v] || 0) + 1);
+      fillValue = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+    }
+
+    let filled = 0;
+    let newRows;
+    if (strategy === "drop") {
+      const before = w.rows.length;
+      newRows = w.rows.filter(r => r[colIdx] && r[colIdx].trim() !== "");
+      filled = before - newRows.length;
+    } else {
+      newRows = w.rows.map(r => {
+        if (!r[colIdx] || r[colIdx].trim() === "") { const nr = [...r]; nr[colIdx] = fillValue; filled++; return nr; }
+        return r;
+      });
+    }
+
+    setWorkingData({ ...w, rows: newRows });
+    setCleanOps(o => ({ ...o, nullsFilled: o.nullsFilled + filled }));
+    const label = { mean: "media", median: "mediana", moda: "moda", zero: "0", drop: "eliminando filas" }[strategy];
+    flash(`null_${colName}`, `${filled} nulo${filled !== 1 ? "s" : ""} con ${label}`);
+  }
+
+  function normalizeHeaders() {
+    if (!headersNeedNorm) return;
+    const w = getCurrent();
+    const changed = normalizedHeaders.filter((n, i) => n !== w.headers[i]).length;
+    setWorkingData({ ...w, headers: normalizedHeaders });
+    setCleanOps(o => ({ ...o, colsNormalized: o.colsNormalized + changed }));
+    flash("headers", `${changed} columna${changed !== 1 ? "s" : ""} normalizada${changed !== 1 ? "s" : ""}`);
+  }
+
+  function resetAll() {
+    setWorkingData(null);
+    setCleanOps({ dupsRemoved: 0, nullsFilled: 0, colsNormalized: 0 });
+    setNullStrats({});
+    setCleanFeedback({});
+  }
+
+  function exportCSV() {
+    const w = getCurrent();
+    const esc = v => (v.includes(",") || v.includes('"') || v.includes("\n")) ? `"${v.replace(/"/g, '""')}"` : v;
+    downloadFile([w.headers.map(esc).join(","), ...w.rows.map(r => r.map(esc).join(","))].join("\n"), "datapulse_limpio.csv", "text/csv");
+  }
+
+  const totalChanges = cleanOps.dupsRemoved + cleanOps.nullsFilled + cleanOps.colsNormalized;
+
+  const btnP = { display: "flex", alignItems: "center", gap: 6, background: B.accentSoft, border: `1px solid ${B.accent}44`, borderRadius: 8, color: B.accent, fontSize: 12, fontWeight: 600, padding: "7px 14px", cursor: "pointer", fontFamily: "inherit" };
+  const btnS = { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: `1px solid ${B.cardBorder}`, borderRadius: 8, color: B.textSecondary, fontSize: 12, padding: "7px 14px", cursor: "pointer", fontFamily: "inherit" };
+  const btnD = { display: "flex", alignItems: "center", gap: 6, background: B.redSoft, border: `1px solid rgba(239,68,68,0.3)`, borderRadius: 8, color: "#FCA5A5", fontSize: 12, fontWeight: 600, padding: "7px 14px", cursor: "pointer", fontFamily: "inherit" };
+  const sel  = { background: B.surface, border: `1px solid ${B.cardBorder}`, borderRadius: 6, color: B.textPrimary, fontSize: 11, padding: "5px 10px", fontFamily: "inherit", cursor: "pointer" };
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      {/* Header row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Ico d={IC.sparkles} size={14} color={B.highlight} />
+          <span style={{ fontSize: 13, fontWeight: 700, color: B.textPrimary }}>Limpieza de datos</span>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {totalChanges > 0 && (
+            <span style={{ fontSize: 11, color: B.textMuted, background: B.surface, border: `1px solid ${B.cardBorder}`, borderRadius: 6, padding: "4px 10px", whiteSpace: "nowrap" }}>
+              {[
+                cleanOps.dupsRemoved > 0 && `${cleanOps.dupsRemoved} dup. eliminados`,
+                cleanOps.nullsFilled > 0 && `${cleanOps.nullsFilled} nulos rellenados`,
+                cleanOps.colsNormalized > 0 && `${cleanOps.colsNormalized} col. normalizadas`,
+              ].filter(Boolean).join(" · ")}
+            </span>
+          )}
+          <button onClick={exportCSV} style={btnP}>
+            <Ico d={IC.download} size={13} color={B.accent} />
+            Descargar CSV limpio
+          </button>
+          {totalChanges > 0 && (
+            <button onClick={resetAll} style={btnS}>
+              <Ico d={IC.refresh} size={13} color={B.textSecondary} />
+              Resetear
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Card: Duplicates */}
+      <div style={card}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: B.textPrimary, marginBottom: 10 }}>Eliminar duplicados</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <span style={{ fontSize: 11, color: dupCount > 0 ? B.highlight : B.green }}>
+            {dupCount > 0 ? `${dupCount} filas duplicadas detectadas` : "Sin duplicados detectados"}
+          </span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <CleanBadge msg={cleanFeedback["dups"]} />
+            <button onClick={removeDuplicates} disabled={dupCount === 0}
+              style={{ ...btnD, opacity: dupCount === 0 ? 0.4 : 1, cursor: dupCount === 0 ? "default" : "pointer" }}>
+              <Ico d={IC.x} size={13} color="#FCA5A5" />
+              {dupCount > 0 ? `Eliminar ${dupCount}` : "Sin duplicados"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Card: Null filling */}
+      <div style={card}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: B.textPrimary, marginBottom: 12 }}>Relleno de valores nulos</div>
+        {nullCols.length === 0 ? (
+          <div style={{ fontSize: 11, color: B.green }}>Sin valores nulos en el dataset actual.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {nullCols.map(({ col, idx, count }) => (
+              <div key={col} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "9px 14px", background: B.surface, borderRadius: 8, border: `1px solid ${B.cardBorder}` }}>
+                <div style={{ flex: "1 1 140px" }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: B.textPrimary }}>{col}</span>
+                  <span style={{ marginLeft: 8, fontSize: 10, color: B.highlight, background: B.highlightSoft, padding: "1px 6px", borderRadius: 4, fontWeight: 600 }}>{count} nulos</span>
+                </div>
+                <select value={nullStrats[col] || "mean"} onChange={e => setNullStrats(s => ({ ...s, [col]: e.target.value }))} style={sel}>
+                  <option value="mean">Rellenar con media</option>
+                  <option value="median">Rellenar con mediana</option>
+                  <option value="moda">Rellenar con moda</option>
+                  <option value="zero">Rellenar con 0</option>
+                  <option value="drop">Eliminar filas con nulos</option>
+                </select>
+                <CleanBadge msg={cleanFeedback[`null_${col}`]} />
+                <button onClick={() => applyNullFill(col, idx)} style={{ ...btnP, fontSize: 11, padding: "5px 12px" }}>
+                  Aplicar
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Card: Normalize headers */}
+      <div style={card}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: B.textPrimary, marginBottom: 10 }}>Normalizar nombres de columnas</div>
+        <div style={{ fontSize: 11, color: B.textMuted, marginBottom: 12 }}>
+          Convierte a minúsculas, reemplaza espacios por{" "}
+          <code style={{ color: B.accent, background: B.accentSoft, padding: "1px 5px", borderRadius: 3 }}>_</code>
+          {" "}y elimina caracteres especiales.
+        </div>
+        {headersNeedNorm ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14, maxHeight: 200, overflowY: "auto" }}>
+            {current.headers.map((h, i) => normalizedHeaders[i] !== h ? (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 11, padding: "6px 12px", background: B.surface, borderRadius: 6, border: `1px solid ${B.cardBorder}` }}>
+                <span style={{ color: B.textMuted, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h}</span>
+                <span style={{ color: B.textMuted, flexShrink: 0 }}>→</span>
+                <span style={{ color: B.green, fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{normalizedHeaders[i]}</span>
+              </div>
+            ) : null)}
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: B.green, marginBottom: 12 }}>Todos los nombres ya están normalizados.</div>
+        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <CleanBadge msg={cleanFeedback["headers"]} />
+          <button onClick={normalizeHeaders} disabled={!headersNeedNorm}
+            style={{ ...btnP, opacity: !headersNeedNorm ? 0.4 : 1, cursor: !headersNeedNorm ? "default" : "pointer" }}>
+            <Ico d={IC.sparkles} size={13} color={B.accent} />
+            Normalizar columnas
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────
 export default function DataPulse() {
   const [data, setData]         = useState(null);
@@ -622,6 +865,12 @@ export default function DataPulse() {
   const [pendingWorkbook, setPendingWorkbook] = useState(null);
   const [sheetNames, setSheetNames]           = useState([]);
   const [activeSheet, setActiveSheet]         = useState("");
+
+  // Data cleaning state (lifted so it survives tab switches)
+  const [workingData, setWorkingData]   = useState(null);
+  const [cleanOps, setCleanOps]         = useState({ dupsRemoved: 0, nullsFilled: 0, colsNormalized: 0 });
+  const [nullStrats, setNullStrats]     = useState({});
+  const [cleanFeedback, setCleanFeedback] = useState({});
 
   const fileRef = useRef();
 
@@ -666,6 +915,7 @@ export default function DataPulse() {
     setExplorerY(numericCols[1] || numericCols[0] || "");
     setAnalysis({ types, statsMap, correlations, catBreakdowns, insights, quality, recommendations });
     setAiInsights(null); setAiError(null);
+    setWorkingData(null); setCleanOps({ dupsRemoved: 0, nullsFilled: 0, colsNormalized: 0 }); setNullStrats({}); setCleanFeedback({});
     setActiveTab("resumen");
   }, []);
 
@@ -997,7 +1247,7 @@ export default function DataPulse() {
           )}
 
           <button
-            onClick={() => { setData(null); setAnalysis(null); setFileName(""); setCatFilters({}); setNumFilters({}); setAiInsights(null); setPendingWorkbook(null); setSheetNames([]); setActiveSheet(""); }}
+            onClick={() => { setData(null); setAnalysis(null); setFileName(""); setCatFilters({}); setNumFilters({}); setAiInsights(null); setPendingWorkbook(null); setSheetNames([]); setActiveSheet(""); setWorkingData(null); setCleanOps({ dupsRemoved: 0, nullsFilled: 0, colsNormalized: 0 }); setNullStrats({}); setCleanFeedback({}); }}
             style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "8px 12px", borderRadius: 8, border: `1px solid ${B.cardBorder}`, background: "transparent", color: B.textMuted, cursor: "pointer", fontSize: 11, fontFamily: "inherit", transition: "all 0.15s" }}
           >
             <Ico d={IC.upload} size={12} color={B.textMuted} />
@@ -1097,6 +1347,19 @@ export default function DataPulse() {
 
               {/* Data Explorer */}
               <DataExplorer headers={headers} rows={filteredRows} />
+
+              {/* Data Cleaner */}
+              <DataCleaner
+                originalData={data}
+                workingData={workingData}
+                setWorkingData={setWorkingData}
+                cleanOps={cleanOps}
+                setCleanOps={setCleanOps}
+                nullStrats={nullStrats}
+                setNullStrats={setNullStrats}
+                cleanFeedback={cleanFeedback}
+                setCleanFeedback={setCleanFeedback}
+              />
 
               {/* Numeric columns */}
               {numericCols.length > 0 && (
