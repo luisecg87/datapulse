@@ -169,6 +169,7 @@ const NAV_ITEMS = [
   { id: "filtros",      label: "Filtros",     icon: "⌥" },
   { id: "correlaciones",label: "Correlaciones",icon: "⌗" },
   { id: "insights",     label: "Insights",    icon: "✦" },
+  { id: "limpieza",     label: "Limpieza",    icon: "⌬" },
   { id: "datos",        label: "Datos",       icon: "≡" },
 ];
 
@@ -318,6 +319,7 @@ export default function DataPulse() {
   const [dragOver, setDragOver] = useState(false);
   const [activeTab, setActiveTab] = useState("resumen");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showDupRows, setShowDupRows] = useState(false);
   const [catFilters, setCatFilters] = useState({});
   const [numFilters, setNumFilters] = useState({});
   const [explorerX, setExplorerX] = useState("");
@@ -497,6 +499,34 @@ export default function DataPulse() {
   const { types, statsMap, correlations, catBreakdowns, insights } = analysis;
   const numericCols = headers.filter((_, i) => types[i] === "numeric");
   const catCols = headers.filter((_, i) => types[i] === "categorical");
+
+  // ── Cleaning analysis ──────────────────────────────────────────
+  const nullAnalysis = headers.map((h, i) => {
+    const vals = rows.map(r => r[i]);
+    const nullCount = vals.filter(v => v === "" || v == null).length;
+    const pct = nullCount / rows.length * 100;
+    return { col: h, nullCount, pct, type: types[i] };
+  }).sort((a, b) => b.nullCount - a.nullCount);
+  const colsWithNulls = nullAnalysis.filter(x => x.nullCount > 0);
+
+  const rowKeys = rows.map(r => r.join("\x00"));
+  const _dupSeen = new Set();
+  const dupIndices = [];
+  rowKeys.forEach((k, i) => { if (_dupSeen.has(k)) dupIndices.push(i); else _dupSeen.add(k); });
+  const dupCount = dupIndices.length;
+  const dupSample = dupIndices.slice(0, 50).map(i => rows[i]);
+
+  const inconsistentCols = headers.map((h, i) => {
+    const vals = rows.map(r => r[i]).filter(v => v !== "" && v != null);
+    if (vals.length === 0) return null;
+    const numCount = vals.filter(v => !isNaN(Number(v.toString().replace(",", ".")))).length;
+    const textCount = vals.length - numCount;
+    if (numCount > 0 && textCount > 0 && Math.min(numCount, textCount) / vals.length > 0.02)
+      return { col: h, numCount, textCount, total: vals.length, detectedType: types[i] };
+    return null;
+  }).filter(Boolean);
+
+  const cleaningIssues = colsWithNulls.length + (dupCount > 0 ? 1 : 0) + inconsistentCols.length;
 
   const activeFiltersCount = Object.entries(catFilters).reduce((acc, [col, s]) => {
     const allVals = [...new Set(rows.map(r => r[headers.indexOf(col)]).filter(Boolean))];
@@ -888,6 +918,245 @@ export default function DataPulse() {
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {/* ── LIMPIEZA ── */}
+          {activeTab === "limpieza" && (
+            <div>
+              <div style={{ marginBottom: 20 }}>
+                <div style={label}>ANÁLISIS DE CALIDAD DE DATOS</div>
+                <p style={{ color: T.fg3, fontSize: 13, margin: "6px 0 0" }}>
+                  {cleaningIssues === 0
+                    ? "No se detectaron problemas de calidad en el dataset."
+                    : `${cleaningIssues} tipo${cleaningIssues !== 1 ? "s" : ""} de problema${cleaningIssues !== 1 ? "s" : ""} detectado${cleaningIssues !== 1 ? "s" : ""}.`}
+                </p>
+              </div>
+
+              {/* KPI chips */}
+              <div style={{ display: "flex", gap: 10, marginBottom: 28, flexWrap: "wrap" }}>
+                {[
+                  { label: "Cols. con nulos",      value: colsWithNulls.length,    amber: colsWithNulls.length > 0 },
+                  { label: "Filas duplicadas",      value: dupCount,                amber: dupCount > 0 },
+                  { label: "Tipos inconsistentes",  value: inconsistentCols.length, amber: inconsistentCols.length > 0 },
+                ].map((chip, i) => {
+                  const clr = chip.amber ? T.amber : T.accent;
+                  return (
+                    <div key={i} style={{
+                      border: `1px solid ${chip.amber ? "rgba(245,166,35,0.3)" : "rgba(0,212,255,0.25)"}`,
+                      background: chip.amber ? T.amberDim : T.accentDim,
+                      padding: "10px 18px",
+                    }}>
+                      <div style={{ ...mono, fontSize: 22, fontWeight: 700, color: clr }}>{chip.value.toLocaleString()}</div>
+                      <div style={{ ...label, marginTop: 2, color: T.fg3 }}>{chip.label}</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* ── Sección 1: Nulos ── */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                  <div style={{ width: 3, height: 16, background: T.amber, flexShrink: 0 }} />
+                  <span style={{ ...mono, fontSize: 12, fontWeight: 600, color: T.fg, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Valores nulos por columna
+                  </span>
+                  <span style={{ ...mono, fontSize: 10, color: T.fg4 }}>({colsWithNulls.length}/{headers.length} columnas afectadas)</span>
+                </div>
+                {colsWithNulls.length === 0 ? (
+                  <div style={{ ...card, display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ color: T.accent, fontSize: 15, flexShrink: 0 }}>✓</span>
+                    <span style={{ ...mono, fontSize: 13, color: T.fg3 }}>Ninguna columna tiene valores vacíos.</span>
+                  </div>
+                ) : (
+                  <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: T.bg2 }}>
+                          {["Columna", "Tipo", "Nulos", "% total", "Severidad", "Sugerencia de acción"].map(h => (
+                            <th key={h} style={{ ...label, padding: "10px 14px", textAlign: "left", whiteSpace: "nowrap" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {nullAnalysis.map(({ col, nullCount, pct, type }) => {
+                          const sevColor = pct > 30 ? "#EF4444" : pct > 10 ? T.amber : T.accent;
+                          const severity = pct > 30 ? "ALTA" : pct > 10 ? "MEDIA" : "BAJA";
+                          const suggestion = nullCount === 0
+                            ? "Sin nulos"
+                            : type === "numeric"
+                              ? pct > 30 ? "Evaluar eliminar columna" : "Imputar con media o mediana"
+                              : pct > 30 ? "Evaluar eliminar columna" : "Imputar con moda o 'Desconocido'";
+                          return (
+                            <tr key={col} style={{ borderTop: `1px solid ${T.line}`, background: nullCount > 0 ? "rgba(245,166,35,0.02)" : "transparent" }}>
+                              <td style={{ padding: "9px 14px", ...mono, fontSize: 12, color: nullCount > 0 ? T.fg : T.fg3, fontWeight: nullCount > 0 ? 600 : 400 }}>{col}</td>
+                              <td style={{ padding: "9px 14px", ...mono, fontSize: 10, color: T.fg4, textTransform: "uppercase" }}>{type}</td>
+                              <td style={{ padding: "9px 14px", ...mono, fontSize: 13, color: nullCount > 0 ? sevColor : T.fg4, fontWeight: nullCount > 0 ? 700 : 400 }}>
+                                {nullCount.toLocaleString()}
+                              </td>
+                              <td style={{ padding: "9px 14px" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <div style={{ width: 56, height: 4, background: T.bg3, flexShrink: 0 }}>
+                                    <div style={{ height: "100%", width: `${Math.min(pct, 100)}%`, background: nullCount > 0 ? sevColor : T.bg3 }} />
+                                  </div>
+                                  <span style={{ ...mono, fontSize: 11, color: nullCount > 0 ? sevColor : T.fg4 }}>{pct.toFixed(1)}%</span>
+                                </div>
+                              </td>
+                              <td style={{ padding: "9px 14px" }}>
+                                {nullCount > 0 && (
+                                  <span style={{ ...mono, fontSize: 9, color: sevColor, border: `1px solid ${sevColor}`, padding: "2px 6px" }}>{severity}</span>
+                                )}
+                              </td>
+                              <td style={{ padding: "9px 14px", ...mono, fontSize: 11, color: T.fg3 }}>{suggestion}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Sección 2: Duplicados ── */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                  <div style={{ width: 3, height: 16, background: T.amber, flexShrink: 0 }} />
+                  <span style={{ ...mono, fontSize: 12, fontWeight: 600, color: T.fg, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Filas duplicadas
+                  </span>
+                </div>
+                <div style={card}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                      <span style={{ ...mono, fontSize: 26, fontWeight: 700, color: dupCount > 0 ? T.amber : T.accent }}>{dupCount.toLocaleString()}</span>
+                      <div>
+                        <div style={{ ...mono, fontSize: 12, color: T.fg }}>
+                          {dupCount === 0 ? "Sin filas duplicadas." : `fila${dupCount !== 1 ? "s" : ""} duplicada${dupCount !== 1 ? "s" : ""} detectada${dupCount !== 1 ? "s" : ""}`}
+                        </div>
+                        {dupCount > 0 && (
+                          <div style={{ ...mono, fontSize: 11, color: T.fg4, marginTop: 3 }}>
+                            {(dupCount / rows.length * 100).toFixed(1)}% del total ·{" "}
+                            <span style={{ color: T.amber }}>Sugerencia: deduplica antes de analizar</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {dupCount > 0 && (
+                      <button onClick={() => setShowDupRows(v => !v)} style={{
+                        ...mono, fontSize: 11,
+                        background: showDupRows ? T.amberDim : "transparent",
+                        border: `1px solid rgba(245,166,35,0.35)`,
+                        color: T.amber, padding: "6px 16px",
+                        cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.05em",
+                      }}>
+                        {showDupRows ? "Ocultar filas" : "Ver filas"}
+                      </button>
+                    )}
+                  </div>
+                  {dupCount > 0 && showDupRows && (
+                    <div style={{ marginTop: 16, borderTop: `1px solid ${T.line2}`, paddingTop: 14 }}>
+                      <div style={{ ...mono, fontSize: 10, color: T.fg4, marginBottom: 10 }}>
+                        Mostrando {Math.min(50, dupCount)} de {dupCount.toLocaleString()} filas duplicadas
+                      </div>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                          <thead>
+                            <tr style={{ background: T.bg2 }}>
+                              {headers.map(h => (
+                                <th key={h} style={{ ...label, padding: "6px 12px", textAlign: "left", whiteSpace: "nowrap" }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {dupSample.map((row, ri) => (
+                              <tr key={ri} style={{ borderTop: `1px solid ${T.line}`, background: "rgba(245,166,35,0.03)" }}>
+                                {row.map((v, ci) => (
+                                  <td key={ci} style={{ padding: "5px 12px", color: T.fg3, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...mono }}>{v || "—"}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* ── Sección 3: Tipos inconsistentes ── */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                  <div style={{ width: 3, height: 16, background: T.amber, flexShrink: 0 }} />
+                  <span style={{ ...mono, fontSize: 12, fontWeight: 600, color: T.fg, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Columnas con tipos inconsistentes
+                  </span>
+                  <span style={{ ...mono, fontSize: 10, color: T.fg4 }}>({inconsistentCols.length} detectadas)</span>
+                </div>
+                {inconsistentCols.length === 0 ? (
+                  <div style={{ ...card, display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ color: T.accent, fontSize: 15, flexShrink: 0 }}>✓</span>
+                    <span style={{ ...mono, fontSize: 13, color: T.fg3 }}>Todos los tipos de columna son consistentes.</span>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {inconsistentCols.map(({ col, numCount, textCount, total, detectedType }) => {
+                      const numPct = (numCount / total * 100).toFixed(1);
+                      const textPct = (textCount / total * 100).toFixed(1);
+                      const suggestion = numCount > textCount
+                        ? `Columna mayoritariamente numérica. Limpiar o marcar como nulos los ${textCount.toLocaleString()} valor${textCount !== 1 ? "es" : ""} no numérico${textCount !== 1 ? "s" : ""}.`
+                        : `Columna mayoritariamente textual. Verificar si los ${numCount.toLocaleString()} valor${numCount !== 1 ? "es" : ""} numérico${numCount !== 1 ? "s" : ""} son errores de entrada.`;
+                      return (
+                        <div key={col} style={{ ...card, marginBottom: 0 }}>
+                          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 16 }}>
+                            <div>
+                              <div style={{ ...mono, fontSize: 13, fontWeight: 700, color: T.amber, marginBottom: 10 }}>{col}</div>
+                              <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+                                <div>
+                                  <div style={{ ...label, marginBottom: 4 }}>Valores numéricos</div>
+                                  <div style={{ ...mono, fontSize: 15, color: T.accent, fontWeight: 700 }}>
+                                    {numCount.toLocaleString()} <span style={{ fontSize: 10, color: T.fg4, fontWeight: 400 }}>({numPct}%)</span>
+                                  </div>
+                                </div>
+                                <div>
+                                  <div style={{ ...label, marginBottom: 4 }}>Valores texto</div>
+                                  <div style={{ ...mono, fontSize: 15, color: T.amber, fontWeight: 700 }}>
+                                    {textCount.toLocaleString()} <span style={{ fontSize: 10, color: T.fg4, fontWeight: 400 }}>({textPct}%)</span>
+                                  </div>
+                                </div>
+                                <div>
+                                  <div style={{ ...label, marginBottom: 4 }}>Tipo detectado</div>
+                                  <span style={{ ...mono, fontSize: 10, color: T.fg4, border: `1px solid ${T.line2}`, padding: "2px 7px" }}>{detectedType.toUpperCase()}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div style={{ maxWidth: 300 }}>
+                              <div style={{ ...label, marginBottom: 6 }}>Sugerencia de acción</div>
+                              <div style={{ fontSize: 12, color: T.fg3, lineHeight: 1.65 }}>{suggestion}</div>
+                            </div>
+                          </div>
+                          <div style={{ marginTop: 14, display: "flex", height: 5, gap: 2 }}>
+                            <div style={{ background: T.accent, flex: numCount }} title={`Numérico: ${numPct}%`} />
+                            <div style={{ background: T.amber, flex: textCount }} title={`Texto: ${textPct}%`} />
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                            <span style={{ ...mono, fontSize: 9, color: T.accent }}>▬ numérico ({numPct}%)</span>
+                            <span style={{ ...mono, fontSize: 9, color: T.amber }}>▬ texto ({textPct}%)</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ── All clear ── */}
+              {cleaningIssues === 0 && (
+                <div style={{ ...card, textAlign: "center", padding: "40px 20px" }}>
+                  <div style={{ fontSize: 30, marginBottom: 12, color: T.accent }}>✓</div>
+                  <div style={{ ...mono, fontSize: 15, fontWeight: 600, color: T.fg, marginBottom: 6 }}>Dataset limpio</div>
+                  <div style={{ fontSize: 13, color: T.fg3 }}>No se detectaron nulos, duplicados ni tipos mezclados.</div>
+                </div>
+              )}
             </div>
           )}
 
