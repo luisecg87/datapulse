@@ -415,6 +415,8 @@ export default function DataPulse() {
   const handleReset = () => { setData(null); setAnalysis(null); setFileName(""); setCatFilters({}); setNumFilters({}); };
 
   const handleExportCSV = useCallback(() => {
+    if (!data) return;
+    const { headers } = data;
     const escape = (v) => {
       const s = v == null ? "" : String(v);
       return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -433,7 +435,7 @@ export default function DataPulse() {
     a.download = `${base}_filtrado${ext}`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [headers, filteredRows, fileName]);
+  }, [data, filteredRows, fileName]);
 
   // ── Upload screen ─────────────────────────────────────────────
   if (!data) {
