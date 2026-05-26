@@ -414,6 +414,27 @@ export default function DataPulse() {
 
   const handleReset = () => { setData(null); setAnalysis(null); setFileName(""); setCatFilters({}); setNumFilters({}); };
 
+  const handleExportCSV = useCallback(() => {
+    const escape = (v) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = [
+      headers.map(escape).join(","),
+      ...filteredRows.map(r => r.map(escape).join(",")),
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const dot = fileName.lastIndexOf(".");
+    const base = dot >= 0 ? fileName.slice(0, dot) : fileName;
+    const ext = dot >= 0 ? fileName.slice(dot) : ".csv";
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${base}_filtrado${ext}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [headers, filteredRows, fileName]);
+
   // ── Upload screen ─────────────────────────────────────────────
   if (!data) {
     return (
@@ -1163,11 +1184,25 @@ export default function DataPulse() {
           {/* ── DATOS ── */}
           {activeTab === "datos" && (
             <div>
-              <div style={{ marginBottom: 20 }}>
-                <div style={label}>VISTA DE DATOS</div>
-                <p style={{ color: T.fg3, fontSize: 13, margin: "6px 0 0" }}>
-                  Mostrando {Math.min(100, filteredRows.length)} de {filteredRows.length.toLocaleString()} filas filtradas.
-                </p>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+                <div>
+                  <div style={label}>VISTA DE DATOS</div>
+                  <p style={{ color: T.fg3, fontSize: 13, margin: "6px 0 0" }}>
+                    Mostrando {Math.min(100, filteredRows.length)} de {filteredRows.length.toLocaleString()} filas filtradas.
+                  </p>
+                </div>
+                <button onClick={handleExportCSV} style={{
+                  ...mono, fontSize: 11, background: T.accentDim,
+                  border: `1px solid ${T.accentLine}`, color: T.accent,
+                  padding: "7px 16px", cursor: "pointer", fontFamily: "inherit",
+                  letterSpacing: "0.06em", textTransform: "uppercase",
+                  transition: "background 0.15s, border-color 0.15s",
+                }}
+                  onMouseEnter={e => { e.currentTarget.style.background = "rgba(0,212,255,0.2)"; e.currentTarget.style.borderColor = T.accent; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = T.accentDim; e.currentTarget.style.borderColor = T.accentLine; }}
+                >
+                  ↓ Exportar CSV
+                </button>
               </div>
               <div style={{ overflowX: "auto", border: `1px solid ${T.line2}` }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
